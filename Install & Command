@@ -1,0 +1,4 @@
+git clone https://github.com/GlobalReconReport/WebWeaver.git
+cd WebWeaver
+sudo bash install.sh
+lw target https://target.example.com
