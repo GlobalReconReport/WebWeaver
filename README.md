@@ -175,24 +175,32 @@ Browser / Mobile App
 ## Quick Start (5 minutes)
 
 ```bash
-# Terminal 1 — start the proxy, tag traffic as "admin-session"
-mitmproxy -s lw-proxy/addon.py \
-    --set ww_session=admin \
-    --set ww_db=webweaver_staging.db \
-    -p 8080
+# Set your target
+TARGET="https://target.example.com"
 
-# Terminal 2 — create sessions and start syncing
+# Create sessions for each privilege level
 lw session new --name admin --role admin
 lw session new --name guest --role user
+
+# Terminal 1 — capture admin traffic through the proxy pointed at your target
+mitmdump -s lw-proxy/addon.py --set ww_session=admin --set ww_db=webweaver_staging.db -p 8080
+# Configure your browser proxy to 127.0.0.1:8080 then browse $TARGET as admin
+
+# Terminal 2 — capture guest traffic on a separate port
+mitmdump -s lw-proxy/addon.py --set ww_session=guest --set ww_db=webweaver_staging.db -p 8081
+# Configure your browser proxy to 127.0.0.1:8081 then browse $TARGET as guest
+
+# Terminal 3 — sync captured traffic into the database
 lw sync --staging webweaver_staging.db --watch &
 
-# Browse the target app as the admin user in your proxy-configured browser.
-# Then change ww_session to "guest" and browse as the guest user.
+# Run all attack modules
+lw run-all --session-a admin --session-b guest --output findings.json
 
-# Terminal 3 — run all attack modules and generate a report
-lw run-all --session-a admin --session-b guest
-lw generate-report --session-a admin --session-b guest \
-    --format hackerone --output report.md
+# Dry run IDOR scan (no requests sent)
+lw scan-idor --session-a admin --session-b guest --dry-run
+
+# Generate a HackerOne report
+lw generate-report --session-a admin --session-b guest --format hackerone --output report.md
 ```
 
 ---
@@ -684,13 +692,14 @@ Commands:
 # ── 0. Set up ─────────────────────────────────────────────────────────────────
 cd ~/webweaver
 source "$HOME/.cargo/env"
+TARGET="https://target.example.com"
 
 # ── 1. Create sessions ────────────────────────────────────────────────────────
 lw session new --name admin --role admin
 lw session new --name guest --role user
 
 # ── 2. Capture admin traffic ──────────────────────────────────────────────────
-# Configure browser to use 127.0.0.1:8080 as HTTP proxy, then browse as admin.
+# Configure browser to use 127.0.0.1:8080 as HTTP proxy, then browse $TARGET as admin.
 mitmdump -s lw-proxy/addon.py \
     --set ww_session=admin \
     --set ww_db=webweaver_staging.db \
@@ -698,7 +707,7 @@ mitmdump -s lw-proxy/addon.py \
 
 lw sync --staging webweaver_staging.db --watch &
 
-# Browse the application as the admin user — account settings, API calls,
+# Browse $TARGET as the admin user — account settings, API calls,
 # object listings, file uploads, payment flows, etc.
 
 # ── 3. Capture guest traffic ──────────────────────────────────────────────────
@@ -708,7 +717,7 @@ mitmdump -s lw-proxy/addon.py \
     --set ww_db=webweaver_staging.db \
     -p 8081 &
 
-# Browse the same pages as guest so the tool has a baseline for comparison.
+# Browse the same pages of $TARGET as guest so the tool has a baseline for comparison.
 
 # ── 4. Stop the proxies when done ─────────────────────────────────────────────
 pkill -f mitmdump
