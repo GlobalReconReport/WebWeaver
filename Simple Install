@@ -1,3 +1,10 @@
 git clone https://github.com/GlobalReconReport/WebWeaver.git
 cd WebWeaver
 sudo bash install.sh
+
+The only thing to sort is the mitmproxy CA cert — just run this once:
+mitmdump &
+sleep 3
+pkill mitmdump
+sudo cp ~/.mitmproxy/mitmproxy-ca-cert.pem /usr/local/share/ca-certificates/mitmproxy.crt
+sudo update-ca-certificates
