@@ -49,6 +49,59 @@ printf "\033[0m"
 
 ---
 
+## Run Your First Scan
+
+After installation, one command is all you need:
+
+```bash
+lw target https://app.example.com
+```
+
+WebWeaver walks you through everything interactively — no flags to memorise, no manual proxy wiring:
+
+```
+╔══════════════════════════════════════════════════════════╗
+║  WebWeaver  →  https://app.example.com                  ║
+╚══════════════════════════════════════════════════════════╝
+
+  STEP 1 of 4  —  Capture admin (privileged) traffic
+  [+] Proxy started on 127.0.0.1:8080
+
+  In your browser:
+    1. Set HTTP/S proxy  →  127.0.0.1:8080
+    2. Log in to https://app.example.com as your ADMIN user
+    3. Browse everything: settings, user lists, API calls, file uploads...
+    4. When finished, press ENTER to continue
+  > _
+
+  STEP 2 of 4  —  Capture guest (low-privilege) traffic
+  ...
+
+  STEP 3 of 4  —  Syncing & running attack modules
+  [*] Syncing captured traffic ...         done  (47 requests)
+  [*] Running IDOR scan ...                done  (3 findings)
+  [*] Running sequence breaker ...         done  (1 finding)
+  [*] Running race condition tests ...     done  (0 findings)
+
+  STEP 4 of 4  —  Review findings & generate report
+  [+] Report saved to report.md
+```
+
+Common options:
+
+```bash
+# HackerOne-formatted report
+lw target https://app.example.com --format hackerone --output h1-report.md
+
+# Different proxy port
+lw target https://app.example.com --port 8888
+
+# Skip the review prompt, include all findings automatically
+lw target https://app.example.com --no-confirm
+```
+
+---
+
 ## What is WebWeaver?
 
 WebWeaver is a Kali Linux toolkit for **Web2 API security research**.  It
