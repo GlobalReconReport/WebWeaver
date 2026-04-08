@@ -332,6 +332,9 @@ struct TargetArgs {
     /// Accept invalid TLS certificates.
     #[arg(long)]
     insecure: bool,
+    /// Use low-memory defaults: race concurrency 3, IDOR max tests 50, sequence max steps 10.
+    #[arg(long)]
+    light: bool,
 }
 
 // ── entry point ───────────────────────────────────────────────────────────────
@@ -978,6 +981,9 @@ async fn run_target(db: PathBuf, args: TargetArgs) -> anyhow::Result<()> {
     println!("  \x1b[1;36m[*]\x1b[0m Sessions  : {} (privileged)  /  {} (low-privilege)", args.admin, args.guest);
     println!("  \x1b[1;36m[*]\x1b[0m Report    : {}", args.output.display());
     println!("  \x1b[1;36m[*]\x1b[0m Addon     : {}", addon.display());
+    if args.light {
+        println!("  \x1b[1;33m[!]\x1b[0m Light mode enabled (low RAM defaults)");
+    }
     println!();
 
     // ── Create sessions (ignore if they already exist) ────────────────────────
@@ -1088,7 +1094,11 @@ async fn run_target(db: PathBuf, args: TargetArgs) -> anyhow::Result<()> {
 
     print!("  \x1b[1;36m[*]\x1b[0m Running IDOR scan ...");
     std::io::stdout().flush().ok();
-    let idor_cfg = IdorScanConfig { dry_run: false, max_tests: 200 };
+    let idor_max   = if args.light { 50 } else { 200 };
+    let seq_steps  = if args.light { 10 } else { 20 };
+    let race_conc  = if args.light {  3 } else { 10 };
+
+    let idor_cfg = IdorScanConfig { dry_run: false, max_tests: idor_max };
     match IdorScanner::new(client.clone())
         .scan(&conn, &args.admin, &args.guest, &idor_cfg)
         .await
@@ -1104,7 +1114,7 @@ async fn run_target(db: PathBuf, args: TargetArgs) -> anyhow::Result<()> {
     print!("  \x1b[1;36m[*]\x1b[0m Running sequence breaker ...");
     std::io::stdout().flush().ok();
     match SequenceBreaker::new(client.clone())
-        .break_sequence(&conn, &args.admin, 20)
+        .break_sequence(&conn, &args.admin, seq_steps)
         .await
     {
         Ok(results) => {
@@ -1117,7 +1127,7 @@ async fn run_target(db: PathBuf, args: TargetArgs) -> anyhow::Result<()> {
 
     print!("  \x1b[1;36m[*]\x1b[0m Running race condition tests ...");
     std::io::stdout().flush().ok();
-    let race_cfg  = RaceConfig { concurrency: 10, timeout_ms: 10_000 };
+    let race_cfg  = RaceConfig { concurrency: race_conc, timeout_ms: 10_000 };
     let race_targets = RaceTester::suggest_targets(&conn, &args.admin).unwrap_or_default();
     let race_limit   = race_targets.len().min(3);
     let mut race_n   = 0usize;
