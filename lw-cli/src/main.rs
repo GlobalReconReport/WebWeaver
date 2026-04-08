@@ -75,6 +75,9 @@ enum Commands {
 
     /// Generate a formatted bug-bounty report from attack findings.
     GenerateReport(GenerateReportArgs),
+
+    /// Guided wizard: capture traffic for a target, run all attacks, generate report.
+    Target(TargetArgs),
 }
 
 // ── session ───────────────────────────────────────────────────────────────────
@@ -298,6 +301,39 @@ struct GenerateReportArgs {
     no_confirm: bool,
 }
 
+// ── target (guided wizard) ────────────────────────────────────────────────────
+
+#[derive(Parser)]
+struct TargetArgs {
+    /// Target URL to test (e.g. https://app.example.com)
+    url: String,
+    /// Report format: markdown | hackerone | bugcrowd  (default: markdown)
+    #[arg(long, short, default_value = "markdown")]
+    format: String,
+    /// Output report file  (default: report.md)
+    #[arg(long, short, default_value = "report.md")]
+    output: PathBuf,
+    /// Name for the privileged session  (default: admin)
+    #[arg(long, default_value = "admin")]
+    admin: String,
+    /// Name for the low-privilege session  (default: guest)
+    #[arg(long, default_value = "guest")]
+    guest: String,
+    /// Proxy port for mitmproxy  (default: 8080)
+    #[arg(long, default_value = "8080")]
+    port: u16,
+    /// Path to the mitmproxy addon script.
+    /// Defaults to /usr/local/share/webweaver/addon.py, then ./lw-proxy/addon.py
+    #[arg(long)]
+    addon: Option<PathBuf>,
+    /// Skip analyst review checkpoint and include all findings automatically.
+    #[arg(long)]
+    no_confirm: bool,
+    /// Accept invalid TLS certificates.
+    #[arg(long)]
+    insecure: bool,
+}
+
 // ── entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -315,6 +351,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::RaceTest(args)        => run_race_test(cli.db, args).await,
         Commands::RunAll(args)          => run_all(cli.db, args).await,
         Commands::GenerateReport(args)  => run_generate_report(cli.db, args).await,
+        Commands::Target(args)          => run_target(cli.db, args).await,
     }
 }
 
@@ -903,6 +940,268 @@ async fn run_generate_report(db: PathBuf, args: GenerateReportArgs) -> anyhow::R
         .with_context(|| format!("Failed to write report to {}", args.output.display()))?;
 
     println!("Report written to {}", args.output.display());
+    Ok(())
+}
+
+// ── target wizard ────────────────────────────────────────────────────────────
+
+async fn run_target(db: PathBuf, args: TargetArgs) -> anyhow::Result<()> {
+    use std::io::Write as _;
+
+    // ── Resolve addon.py path ─────────────────────────────────────────────────
+    let addon = match args.addon {
+        Some(p) => p,
+        None => {
+            let candidates = [
+                PathBuf::from("/usr/local/share/webweaver/addon.py"),
+                PathBuf::from("./lw-proxy/addon.py"),
+            ];
+            candidates
+                .into_iter()
+                .find(|p| p.exists())
+                .ok_or_else(|| anyhow::anyhow!(
+                    "Cannot find addon.py. Pass --addon /path/to/addon.py or run from the WebWeaver directory."
+                ))?
+        }
+    };
+
+    // ── Staging DB (used only by mitmdump / sync) ─────────────────────────────
+    let staging = PathBuf::from("webweaver_staging.db");
+
+    // ── Header ────────────────────────────────────────────────────────────────
+    println!();
+    println!("\x1b[1;38;5;99m╔══════════════════════════════════════════════════════════╗\x1b[0m");
+    println!("\x1b[1;38;5;99m║  WebWeaver  →  {:<42}║\x1b[0m", args.url);
+    println!("\x1b[1;38;5;99m╚══════════════════════════════════════════════════════════╝\x1b[0m");
+    println!();
+    println!("  \x1b[1;36m[*]\x1b[0m Database  : {}", db.display());
+    println!("  \x1b[1;36m[*]\x1b[0m Sessions  : {} (privileged)  /  {} (low-privilege)", args.admin, args.guest);
+    println!("  \x1b[1;36m[*]\x1b[0m Report    : {}", args.output.display());
+    println!("  \x1b[1;36m[*]\x1b[0m Addon     : {}", addon.display());
+    println!();
+
+    // ── Create sessions (ignore if they already exist) ────────────────────────
+    {
+        let conn = lw_core::open_main_db(&db)?;
+        for (name, role) in [(&args.admin, "admin"), (&args.guest, "user")] {
+            match lw_core::create_session(&conn, name, role) {
+                Ok(_) | Err(_) => {} // already exists is fine
+            }
+        }
+    }
+
+    // ── STEP 1 — Capture admin traffic ────────────────────────────────────────
+    println!("\x1b[1;38;5;99m──────────────────────────────────────────────────────────\x1b[0m");
+    println!("\x1b[1;38;5;99m  STEP 1 of 4  —  Capture {} (privileged) traffic\x1b[0m", args.admin);
+    println!("\x1b[1;38;5;99m──────────────────────────────────────────────────────────\x1b[0m");
+    println!();
+
+    let mut mitm = std::process::Command::new("mitmdump")
+        .args([
+            "-s", addon.to_str().unwrap_or("addon.py"),
+            "--set", &format!("ww_session={}", args.admin),
+            "--set", &format!("ww_db={}", staging.display()),
+            "-p", &args.port.to_string(),
+            "--no-web-open-browser",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("Failed to start mitmdump. Is mitmproxy installed? (sudo apt install mitmproxy)")?;
+
+    println!("  \x1b[1;32m[+]\x1b[0m Proxy started on \x1b[1;33m127.0.0.1:{}\x1b[0m", args.port);
+    println!();
+    println!("  In your browser:");
+    println!("    1. Set HTTP/S proxy  →  \x1b[1;33m127.0.0.1:{}\x1b[0m", args.port);
+    println!("    2. Log in to \x1b[1;36m{}\x1b[0m as your \x1b[1;31mADMIN / high-privilege\x1b[0m user", args.url);
+    println!("    3. Browse everything: settings, user lists, API calls,");
+    println!("       file uploads, payment flows, admin panels, etc.");
+    println!("    4. When finished, press \x1b[1;32mENTER\x1b[0m to continue");
+    println!();
+    print!("  > ");
+    std::io::stdout().flush().ok();
+    let mut _buf = String::new();
+    std::io::stdin().read_line(&mut _buf)?;
+
+    mitm.kill().ok();
+    mitm.wait().ok();
+    println!("  \x1b[1;32m[+]\x1b[0m Admin traffic captured.");
+    println!();
+
+    // ── STEP 2 — Capture guest traffic ────────────────────────────────────────
+    println!("\x1b[1;38;5;99m──────────────────────────────────────────────────────────\x1b[0m");
+    println!("\x1b[1;38;5;99m  STEP 2 of 4  —  Capture {} (low-privilege) traffic\x1b[0m", args.guest);
+    println!("\x1b[1;38;5;99m──────────────────────────────────────────────────────────\x1b[0m");
+    println!();
+
+    let mut mitm = std::process::Command::new("mitmdump")
+        .args([
+            "-s", addon.to_str().unwrap_or("addon.py"),
+            "--set", &format!("ww_session={}", args.guest),
+            "--set", &format!("ww_db={}", staging.display()),
+            "-p", &args.port.to_string(),
+            "--no-web-open-browser",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("Failed to start mitmdump")?;
+
+    println!("  \x1b[1;32m[+]\x1b[0m Proxy restarted on \x1b[1;33m127.0.0.1:{}\x1b[0m  (now tagging as {})", args.port, args.guest);
+    println!();
+    println!("  In your browser:");
+    println!("    1. Log out and log in as your \x1b[1;33mGUEST / low-privilege\x1b[0m user");
+    println!("    2. Browse the same pages you visited as {}", args.admin);
+    println!("    3. When finished, press \x1b[1;32mENTER\x1b[0m to continue");
+    println!();
+    print!("  > ");
+    std::io::stdout().flush().ok();
+    _buf.clear();
+    std::io::stdin().read_line(&mut _buf)?;
+
+    mitm.kill().ok();
+    mitm.wait().ok();
+    println!("  \x1b[1;32m[+]\x1b[0m Guest traffic captured.");
+    println!();
+
+    // ── STEP 3 — Sync + attack ────────────────────────────────────────────────
+    println!("\x1b[1;38;5;99m──────────────────────────────────────────────────────────\x1b[0m");
+    println!("\x1b[1;38;5;99m  STEP 3 of 4  —  Syncing & running attack modules\x1b[0m");
+    println!("\x1b[1;38;5;99m──────────────────────────────────────────────────────────\x1b[0m");
+    println!();
+
+    // Sync
+    print!("  \x1b[1;36m[*]\x1b[0m Syncing captured traffic ...");
+    std::io::stdout().flush().ok();
+    let normalizer = Arc::new(lw_core::Normalizer::from_file_or_defaults(
+        &PathBuf::from("filter_rules.toml"),
+    ));
+    let synced = lw_core::Syncer::new(&staging, &db, normalizer)
+        .sync_once()
+        .context("Sync failed")?;
+    println!("  \x1b[1;32mdone\x1b[0m  ({synced} request(s))");
+
+    // Attack
+    let conn   = lw_core::open_main_db(&db)?;
+    let client = lw_core::attack::build_client(args.insecure, None)?;
+    let mut all_findings = Vec::new();
+
+    print!("  \x1b[1;36m[*]\x1b[0m Running IDOR scan ...");
+    std::io::stdout().flush().ok();
+    let idor_cfg = IdorScanConfig { dry_run: false, max_tests: 200 };
+    match IdorScanner::new(client.clone())
+        .scan(&conn, &args.admin, &args.guest, &idor_cfg)
+        .await
+    {
+        Ok(attempts) => {
+            let n = attempts.iter().filter(|a| a.is_idor).count();
+            println!("  \x1b[1;32mdone\x1b[0m  ({n} finding(s))");
+            all_findings.extend(attempts_to_findings(&attempts));
+        }
+        Err(e) => println!("  \x1b[1;31mfailed\x1b[0m: {e}"),
+    }
+
+    print!("  \x1b[1;36m[*]\x1b[0m Running sequence breaker ...");
+    std::io::stdout().flush().ok();
+    match SequenceBreaker::new(client.clone())
+        .break_sequence(&conn, &args.admin, 20)
+        .await
+    {
+        Ok(results) => {
+            let n = results.iter().filter(|r| !r.rejected).count();
+            println!("  \x1b[1;32mdone\x1b[0m  ({n} finding(s))");
+            all_findings.extend(results_to_findings(&results));
+        }
+        Err(e) => println!("  \x1b[1;31mfailed\x1b[0m: {e}"),
+    }
+
+    print!("  \x1b[1;36m[*]\x1b[0m Running race condition tests ...");
+    std::io::stdout().flush().ok();
+    let race_cfg  = RaceConfig { concurrency: 10, timeout_ms: 10_000 };
+    let race_targets = RaceTester::suggest_targets(&conn, &args.admin).unwrap_or_default();
+    let race_limit   = race_targets.len().min(3);
+    let mut race_n   = 0usize;
+    for &req_id in race_targets.iter().take(race_limit) {
+        if let Ok(result) = RaceTester::new(client.clone())
+            .test(&conn, &args.admin, req_id, &race_cfg)
+            .await
+        {
+            race_n += result.findings.len();
+            all_findings.extend(result_to_findings(&result));
+        }
+    }
+    println!("  \x1b[1;32mdone\x1b[0m  ({race_n} finding(s))");
+    println!();
+
+    // Score and rank
+    let scored = SeverityScorer::new().rank(all_findings);
+
+    if scored.is_empty() {
+        println!("  \x1b[1;33m[!]\x1b[0m No findings — nothing to report.");
+        return Ok(());
+    }
+
+    // ── STEP 4 — Analyst review + report ─────────────────────────────────────
+    println!("\x1b[1;38;5;99m──────────────────────────────────────────────────────────\x1b[0m");
+    println!("\x1b[1;38;5;99m  STEP 4 of 4  —  Review findings & generate report\x1b[0m");
+    println!("\x1b[1;38;5;99m──────────────────────────────────────────────────────────\x1b[0m");
+    println!();
+
+    let summary = ReportGenerator::draft_summary(&scored);
+    println!("{summary}");
+
+    let included_indices: Vec<usize> = if args.no_confirm {
+        (0..scored.len()).collect()
+    } else {
+        println!("  Enter finding NUMBERS to EXCLUDE (comma-separated), or press ENTER to include all:");
+        print!("  > ");
+        std::io::stdout().flush().ok();
+        _buf.clear();
+        std::io::stdin().read_line(&mut _buf)?;
+        let trimmed = _buf.trim();
+
+        let excluded: std::collections::HashSet<usize> = if trimmed.is_empty() {
+            std::collections::HashSet::new()
+        } else {
+            trimmed.split(',')
+                .filter_map(|s| s.trim().parse::<usize>().ok())
+                .collect()
+        };
+
+        if !excluded.is_empty() {
+            println!(
+                "  Excluding {} finding(s). {} will appear in the report.",
+                excluded.len(), scored.len() - excluded.len()
+            );
+        }
+        (1..=scored.len()).filter(|i| !excluded.contains(i)).map(|i| i - 1).collect()
+    };
+
+    let selected: Vec<_> = included_indices.iter().map(|&i| scored[i].clone()).collect();
+
+    if selected.is_empty() {
+        println!("  All findings excluded — no report generated.");
+        return Ok(());
+    }
+
+    let redact = RedactEngine::default_rules();
+    println!();
+    print!("  \x1b[1;36m[*]\x1b[0m Generating report ({} finding(s)) ...", selected.len());
+    std::io::stdout().flush().ok();
+
+    let report_findings = ReportGenerator::build_report_findings(&conn, &selected, &redact)?;
+    let format = ReportFormat::from_str(&args.format);
+    let date   = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let report = ReportGenerator::render(&report_findings, &format, &date)?;
+
+    std::fs::write(&args.output, &report)
+        .with_context(|| format!("Failed to write report to {}", args.output.display()))?;
+
+    println!("  \x1b[1;32mdone\x1b[0m");
+    println!();
+    println!("  \x1b[1;32m[+]\x1b[0m Report saved to \x1b[1;36m{}\x1b[0m", args.output.display());
+    println!();
+
     Ok(())
 }
 

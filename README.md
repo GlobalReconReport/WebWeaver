@@ -172,35 +172,36 @@ Browser / Mobile App
 
 ---
 
-## Quick Start (5 minutes)
+## Quick Start
+
+One command does everything — it walks you through each step interactively:
 
 ```bash
-# Set your target
-TARGET="https://target.example.com"
+lw target https://app.example.com
+```
 
-# Create sessions for each privilege level
-lw session new --name admin --role admin
-lw session new --name guest --role user
+The wizard will:
+1. Start the proxy and tell you what to do in your browser
+2. Guide you through browsing as the **admin** (high-privilege) user
+3. Guide you through browsing as the **guest** (low-privilege) user
+4. Automatically run IDOR, race-condition, and sequence-break scans
+5. Show you the ranked findings and let you exclude any false positives
+6. Write a finished report to `report.md`
 
-# Terminal 1 — capture admin traffic through the proxy pointed at your target
-mitmdump -s lw-proxy/addon.py --set ww_session=admin --set ww_db=webweaver_staging.db -p 8080
-# Configure your browser proxy to 127.0.0.1:8080 then browse $TARGET as admin
+**Options:**
 
-# Terminal 2 — capture guest traffic on a separate port
-mitmdump -s lw-proxy/addon.py --set ww_session=guest --set ww_db=webweaver_staging.db -p 8081
-# Configure your browser proxy to 127.0.0.1:8081 then browse $TARGET as guest
+```bash
+# Generate a HackerOne-formatted report
+lw target https://app.example.com --format hackerone --output h1-report.md
 
-# Terminal 3 — sync captured traffic into the database
-lw sync --staging webweaver_staging.db --watch &
+# Use a different proxy port
+lw target https://app.example.com --port 8888
 
-# Run all attack modules
-lw run-all --session-a admin --session-b guest --output findings.json
+# Skip the analyst review step (include all findings automatically)
+lw target https://app.example.com --no-confirm
 
-# Dry run IDOR scan (no requests sent)
-lw scan-idor --session-a admin --session-b guest --dry-run
-
-# Generate a HackerOne report
-lw generate-report --session-a admin --session-b guest --format hackerone --output report.md
+# Use custom session names
+lw target https://app.example.com --admin superuser --guest regular
 ```
 
 ---
