@@ -1,0 +1,16 @@
+[package]
+name    = "lw-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "lw"
+path = "src/main.rs"
+
+[dependencies]
+lw-core    = { path = "../lw-core" }
+clap       = { version = "4", features = ["derive"] }
+serde_json = { workspace = true }
+anyhow     = { workspace = true }
+chrono     = { workspace = true }
+tokio      = { version = "1", features = ["full"] }

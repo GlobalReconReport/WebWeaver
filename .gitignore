@@ -1,0 +1,27 @@
+# Rust build artifacts
+/target/
+Cargo.lock
+
+# Database files — contain captured live traffic, never commit
+*.db
+*.db-wal
+*.db-shm
+
+# Generated reports (may contain sensitive findings)
+report.md
+*-report.md
+findings.json
+*.findings.json
+
+# Redaction config may contain app-specific patterns
+redact.toml
+
+# Filter rules (optional, users create their own)
+filter_rules.toml
+
+# OS / editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
